@@ -1,0 +1,7 @@
+# .github/FUNDING.yml
+# GitHub Sponsors + custom donation links (mirrored repos).
+# Replace STRIPE_PAYMENT_LINK with the live Stripe Payment Link after Phase 3.
+github: [TunedChaos]
+custom:
+  - "https://chaosnexus.ai/guide/support"
+  # - "https://buy.stripe.com/REPLACE_ME"
