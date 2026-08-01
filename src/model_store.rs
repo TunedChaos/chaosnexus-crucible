@@ -1,7 +1,9 @@
 // chaosnexus-crucible/src/model_store.rs
 //! Download and locate GGUF (and related) model files under `models_dir`.
 
-use hf_hub::{api::tokio::ApiBuilder, Repo, RepoType};
+use futures_util::StreamExt;
+use hf_hub::repository::RepoTreeEntry;
+use hf_hub::HFClient;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,17 +35,30 @@ pub struct PullRequest {
     pub gguf_file: Option<String>,
 }
 
-fn api_builder() -> ApiBuilder {
-    let mut b = ApiBuilder::new();
+/// Split a Hub repo id (`owner/name`) into owner and name components.
+fn split_repo_id(model_id: &str) -> Result<(&str, &str), String> {
+    let (owner, name) = model_id
+        .split_once('/')
+        .ok_or_else(|| format!("Hub model id `{model_id}` must be `owner/name`"))?;
+    if owner.is_empty() || name.is_empty() {
+        return Err(format!("Hub model id `{model_id}` must be `owner/name`"));
+    }
+    Ok((owner, name))
+}
+
+/// Build an authenticated (when token present) Hugging Face Hub client.
+fn hf_client() -> Result<HFClient, String> {
+    let mut builder = HFClient::builder();
     if let Ok(token) = std::env::var("HF_TOKEN") {
         if !token.trim().is_empty() {
-            b = b.with_token(Some(token));
+            builder = builder.token(token);
         }
     } else if let Ok(token) = std::env::var("HUGGING_FACE_HUB_TOKEN")
-        && !token.trim().is_empty() {
-            b = b.with_token(Some(token));
-        }
-    b
+        && !token.trim().is_empty()
+    {
+        builder = builder.token(token);
+    }
+    builder.build().map_err(|e| format!("hf-hub client: {e}"))
 }
 
 /// Cache subdirectory for a Hub repo id (`org--name`).
@@ -115,24 +130,28 @@ pub async fn ensure_gguf(
 
     let result = async {
         println!("[model_store] Pulling {model_id} into {} ...", dir.display());
-        let api = api_builder()
-            .build()
-            .map_err(|e| format!("hf-hub api: {e}"))?;
-        let repo = api.repo(Repo::with_revision(
-            model_id.to_string(),
-            RepoType::Model,
-            "main".to_string(),
-        ));
+        let (owner, name) = split_repo_id(model_id)?;
+        let client = hf_client()?;
+        let repo = client.model(owner, name);
 
-        let info = repo
-            .info()
-            .await
-            .map_err(|e| format!("repo info {model_id}: {e}"))?;
-        let mut remote_ggufs: Vec<String> = info
-            .siblings
+        let tree = repo
+            .list_tree()
+            .recursive(true)
+            .send()
+            .map_err(|e| format!("repo tree {model_id}: {e}"))?;
+        let mut tree = std::pin::pin!(tree);
+        let mut remote_files: Vec<String> = Vec::new();
+        while let Some(entry) = tree.as_mut().next().await {
+            let entry = entry.map_err(|e| format!("repo tree entry {model_id}: {e}"))?;
+            if let RepoTreeEntry::File { path, .. } = entry {
+                remote_files.push(path);
+            }
+        }
+
+        let mut remote_ggufs: Vec<String> = remote_files
             .iter()
-            .map(|s| s.rfilename.clone())
             .filter(|n| n.ends_with(".gguf"))
+            .cloned()
             .collect();
         remote_ggufs.sort();
         if remote_ggufs.is_empty() {
@@ -156,7 +175,10 @@ pub async fn ensure_gguf(
 
         println!("[model_store] Downloading {target_name} ...");
         let downloaded = repo
-            .get(&target_name)
+            .download_file()
+            .filename(target_name.clone())
+            .local_dir(dir.clone())
+            .send()
             .await
             .map_err(|e| format!("download {target_name}: {e}"))?;
 
@@ -174,10 +196,16 @@ pub async fn ensure_gguf(
             "tokenizer_config.json",
             "special_tokens_map.json",
         ] {
-            if info.siblings.iter().any(|s| s.rfilename == name)
-                && let Ok(src) = repo.get(name).await {
-                    let _ = fs::copy(&src, dir.join(name));
-                }
+            if remote_files.iter().any(|p| p == name)
+                && let Ok(src) = repo
+                    .download_file()
+                    .filename(name.to_string())
+                    .local_dir(dir.clone())
+                    .send()
+                    .await
+            {
+                let _ = fs::copy(&src, dir.join(name));
+            }
         }
 
         Ok(dest)
@@ -239,6 +267,45 @@ mod tests {
         fs::write(tmp.join("prefer.gguf"), b"b").unwrap();
         let found = find_local_gguf(&tmp, Some("prefer.gguf")).unwrap();
         assert!(found.ends_with("prefer.gguf"));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn split_repo_id_requires_owner_name() {
+        assert_eq!(split_repo_id("org/model").unwrap(), ("org", "model"));
+        assert!(split_repo_id("noslash").is_err());
+        assert!(split_repo_id("/name").is_err());
+        assert!(split_repo_id("org/").is_err());
+    }
+
+    #[test]
+    fn cache_subdir_flattens_slash() {
+        let dir = PathBuf::from("/models");
+        assert_eq!(
+            cache_subdir(&dir, "TunedChaos/ChaosNexus_Tuned_v1"),
+            PathBuf::from("/models/TunedChaos--ChaosNexus_Tuned_v1")
+        );
+    }
+
+    #[test]
+    fn list_cached_skips_dotdirs_and_files() {
+        let tmp = std::env::temp_dir().join(format!("cn-ms-list-{}", Uuid::new_v4()));
+        fs::create_dir_all(tmp.join("keep-me")).unwrap();
+        fs::create_dir_all(tmp.join(".hidden")).unwrap();
+        fs::write(tmp.join("file.txt"), b"x").unwrap();
+        let listed = list_cached(&tmp);
+        assert_eq!(listed, vec!["keep-me".to_string()]);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn find_local_gguf_falls_back_to_sorted_first() {
+        let tmp = std::env::temp_dir().join(format!("cn-ms-fb-{}", Uuid::new_v4()));
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("z.gguf"), b"z").unwrap();
+        fs::write(tmp.join("a.gguf"), b"a").unwrap();
+        let found = find_local_gguf(&tmp, None).unwrap();
+        assert!(found.ends_with("a.gguf"));
         let _ = fs::remove_dir_all(&tmp);
     }
 }

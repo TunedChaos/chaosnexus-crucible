@@ -228,6 +228,21 @@ mod tests {
     use std::env;
 
     #[test]
+    fn normalize_project_root_rejects_empty() {
+        assert!(normalize_project_root("").is_err());
+        assert!(normalize_project_root("   ").is_err());
+    }
+
+    #[test]
+    fn normalize_project_root_accepts_absolute() {
+        let tmp = env::temp_dir().join(format!("crucible-norm-{}", Uuid::new_v4()));
+        fs::create_dir_all(&tmp).unwrap();
+        let normalized = normalize_project_root(tmp.to_str().unwrap()).unwrap();
+        assert!(!normalized.is_empty());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn create_list_update_delete_roundtrip() {
         let tmp = env::temp_dir().join(format!("crucible-sess-{}", Uuid::new_v4()));
         fs::create_dir_all(&tmp).unwrap();
