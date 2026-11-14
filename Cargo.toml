@@ -1,0 +1,30 @@
+[package]
+name = "chaosnexus-crucible"
+version = "0.8.5"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+description = "Local LLM inference service for ChaosNexus (Candle + MCP client)"
+repository = "https://github.com/TunedChaos/chaosnexus-crucible"
+homepage = "https://chaosnexus.ai"
+
+[dependencies]
+async-trait = "0.1.91"
+axum = "0.8.9"
+candle-core = "0.11.0"
+candle-nn = "0.11.0"
+candle-transformers = "0.11.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+directories = "6.0.0"
+futures-util = "0.3.33"
+hf-hub = "1.0.0"
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+sha2 = "0.10"
+rust-mcp-sdk = "1.0.1"
+rust-mcp-transport = "1.0.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokenizers = { version = "0.23.1", features = ["http"] }
+tokio = { version = "1.53.1", features = ["full"] }
+toml = "1.1.4"
+uuid = { version = "1.24", features = ["v4", "serde"] }
